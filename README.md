@@ -1,4 +1,4 @@
-# Voyage Privé × Mixpanel — Architecture Recommendation
+# Voyage Privé × Mixpanel: Architecture Recommendation
 
 > **Post-POC architecture proposal** for aligning Mixpanel with Voyage Privé's existing Snowplow and BigQuery stack. The goal: a single source of truth for product data, with Mixpanel as the self-serve analysis layer for product teams.
 
