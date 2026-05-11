@@ -1,4 +1,4 @@
-# Voyage Privé × Mixpanel: Architecture Recommendation
+# Voyage Privé × Mixpanel — Architecture Recommendation
 
 > **Post-POC architecture proposal** for aligning Mixpanel with Voyage Privé's existing Snowplow and BigQuery stack. The goal: a single source of truth for product data, with Mixpanel as the self-serve analysis layer for product teams.
 
@@ -7,9 +7,9 @@
 ## Contents
 
 1. [Background](#1-background)
-2. [Current State & Problems](#2-current-state--problems)
+2. [Current State](#2-current-state)
 3. [Target Architecture](#3-target-architecture)
-4. [Ingestion Path - Two Options](#4-ingestion-path--two-options)
+4. [Ingestion Path](#4-ingestion-path)
 5. [Mobile Strategy](#5-mobile-strategy)
 6. [Data Layer Audit](#6-data-layer-audit)
 7. [Governance Model](#7-governance-model)
@@ -19,183 +19,152 @@
 
 ## 1. Background
 
-The POC has demonstrated that Mixpanel can power the product analytics use cases Voyage Privé needs - funnel analysis, segmentation, PM self-serve insight, retention. The data is there. The question being raised now is the right one: **what does a production-ready architecture look like, and where does Mixpanel sit within it?**
+The POC has demonstrated that Mixpanel can power the product analytics use cases Voyage Privé needs — funnel analysis, segmentation, PM self-serve insight, retention. The data is there. The question being raised now is the right one: **what does a production-ready architecture look like, and where does Mixpanel sit within it?**
 
-Vincent's instinct, that Snowplow and BigQuery should remain the source of truth, with Mixpanel as the analysis layer reading from them - is the correct framing. This document proposes how to get there, and in what order.
+Vincent's instinct — that Snowplow and BigQuery should remain the source of truth, with Mixpanel as the analysis layer reading from them — is the correct framing. This document proposes how to get there cleanly.
 
-> **Core principle:** BigQuery is the source of truth. Mixpanel is the lens. Any fix, enrichment or new property is made once in BigQuery, and Mirror mode propagates it automatically - no re-instrumentation, no dual maintenance.
+> **Core principle:** BigQuery is the source of truth. Mixpanel is the lens. Any fix, modelling change or new property is made once in BigQuery, and Mirror mode propagates it automatically — no re-instrumentation, no dual maintenance.
 
 ---
 
-## 2. Current State & Problems
+## 2. Current State
 
-The POC architecture is functional - the data we have been analysing proves it. But it is not production-ready as a long-term foundation. Three issues need to be resolved before building further on top of it.
+The POC architecture is sound in principle and has proven itself during the evaluation. The path from Snowplow through BigQuery to Mixpanel is the right one. What needs attention is not the architecture itself, but the quality of what flows through it. Three things need to be addressed to move from a working POC to a production-ready setup.
 
-| # | Problem | Why it matters |
-|---|---------|---------------|
-| 1 | **The data layer hasn't been audited** | Missing context, unnested ARRAY columns, undefined UTMs and gaps in business properties suggest the instrumentation predates any product analytics intent. Messy data in, messy data in. |
-| 2 | **The ingestion journey is too long** | GTM → Snowplow → BigQuery → Warehouse Connector means multiple failure points and meaningful latency. Mirror runs daily, so Mixpanel is always ~24 hours behind live product behaviour. |
-| 3 | **No mobile app instrumentation** | The mobile app has no event tracking today. 78% of search events come from Phone users, yet the in-app journey is invisible. |
+| # | Area | What needs to happen |
+|---|------|---------------------|
+| 1 | **Data layer quality** | VP's data layer predates product analytics intent. The BigQuery modelling view needs a full audit — missing context, unnested arrays and incomplete business properties need to be resolved before the architecture can be relied upon for product decisions. |
+| 2 | **Event collection approach** | The current reliance on client-side GTM introduces fragility and makes instrumentation harder to audit and version-control as the product evolves. A move toward server-side or direct Snowplow SDK tracking is worth planning. |
+| 3 | **Mobile instrumentation** | The native mobile app has no event tracking today. Given that 78% of search interactions come from phone users, this is a meaningful gap to address in the next phase. |
 
-> ⚠️ **The data layer audit is the critical path.** Until the BigQuery view produces clean, flat, correctly-typed data with proper identity mapping, any other architectural change just moves the same problems faster. The audit comes first.
+> The architecture is right. The work is in the data flowing through it.
 
 ---
 
 ## 3. Target Architecture
 
-The proposed architecture keeps Snowplow and BigQuery as the collection and enrichment backbone, with Mixpanel reading from BigQuery via the Warehouse Connector in Mirror mode. No new pipeline complexity until the foundation is solid.
+The proposed architecture keeps Snowplow and BigQuery as the collection and modelling backbone, with Mixpanel reading from BigQuery via the Warehouse Connector in Mirror mode. The responsibilities of each layer are distinct and should stay that way.
 
 ```
-┌─────────────────────────────────────────────┐
-│  Collection Layer                           │
-│  VP Data Layer → Google Tag Manager         │
-│  custom events + properties · web only      │
-└────────────────────┬────────────────────────┘
-                     │  fires via Snowplow JS tracker
-                     ▼
-┌─────────────────────────────────────────────┐
-│  Enrichment Layer                           │
-│  Snowplow Pipeline                          │
-│  schema validation · context enrichment     │
-│  UTM parsing · PII / consent handling       │
-└────────────────────┬────────────────────────┘
-                     │  enriched events → raw table
-                     ▼
-┌─────────────────────────────────────────────┐
-│  ★ SOURCE OF TRUTH                          │
-│  BigQuery - snowplow_events.events          │
-│                                             │
-│  • Flattened SQL view                       │
-│  • user_id + device_id identity columns     │
-│  • Business context extracted from arrays   │
-│  • UTM normalised · bot traffic filtered    │
-└────────────────────┬────────────────────────┘
-                     │  Mirror mode · daily sync
-                     │  automatic retroactive updates
-                     ▼
-┌─────────────────────────────────────────────┐
-│  Analysis Layer                             │
-│  Mixpanel (EU) - Warehouse Connector        │
-│                                             │
-│  • Funnels · Retention · Flows              │
-│  • Session Replay (booking flow)            │
-│  • Lexicon governance                       │
-│  • PM self-serve dashboards                 │
-│  • MCP-powered programmatic querying        │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Collection Layer                               │
+│  Application → Snowplow JS / Server-side SDK    │
+│  custom events + properties                     │
+│  (GTM today — direct SDK recommended over time) │
+└─────────────────────┬───────────────────────────┘
+                      │  raw events to Snowplow collector
+                      ▼
+┌─────────────────────────────────────────────────┐
+│  Enrichment Layer                               │
+│  Snowplow Pipeline                              │
+│  schema validation · context enrichment         │
+│  UTM parsing · PII handling · consent           │
+└─────────────────────┬───────────────────────────┘
+                      │  enriched events → raw table
+                      ▼
+┌─────────────────────────────────────────────────┐
+│  ★ SOURCE OF TRUTH                              │
+│  BigQuery — snowplow_events.events              │
+│                                                 │
+│  • SQL modelling view                           │
+│  • ARRAY contexts flattened to scalar columns   │
+│  • user_id + device_id identity columns         │
+│  • UTM values normalised                        │
+│  • Device type consolidated · bot filtered      │
+└─────────────────────┬───────────────────────────┘
+                      │  Mirror mode
+                      │  hourly sync or API-triggered
+                      │  automatic retroactive updates
+                      ▼
+┌─────────────────────────────────────────────────┐
+│  Analysis Layer                                 │
+│  Mixpanel (EU) — Warehouse Connector            │
+│                                                 │
+│  • Funnels · Retention · Flows                  │
+│  • Session Replay (booking flow)                │
+│  • Lexicon governance                           │
+│  • PM self-serve dashboards                     │
+│  • MCP-powered programmatic querying            │
+└─────────────────────────────────────────────────┘
 ```
 
-**The key principle:** no enrichment or data modelling happens inside Mixpanel. Mixpanel receives clean, pre-modelled data from BigQuery. Any fix is made once in the BigQuery view, and Mirror reflects it automatically - including historically. This is the Mirror advantage that directly addresses VP's goal of one source of truth.
+### How the layers divide responsibility
+
+**Snowplow handles enrichment** — schema validation, context attachment, UTM parsing and PII handling all happen in the Snowplow pipeline before data reaches BigQuery. This is Snowplow's core function and should not be replicated downstream.
+
+**BigQuery handles modelling** — what happens in BigQuery is preparation for Mixpanel's data model, not re-enrichment: flattening ARRAY contexts into scalar columns, casting types correctly, normalising inconsistent values, filtering bot traffic, and surfacing the identity columns Mixpanel needs. This is a SQL modelling view maintained and version-controlled by the data team.
+
+**Mixpanel handles analysis** — no data transformation happens in Mixpanel. It receives clean, pre-modelled data and surfaces it through funnels, retention analysis, flows and dashboards. The Lexicon layer governs what PMs see and how properties are labelled.
+
+### On the collection layer
+
+VP currently uses Google Tag Manager to fire events to the Snowplow collector. GTM works and is not a reason to change anything in the short term. However as VP's event taxonomy grows, GTM's client-side nature introduces limitations worth planning around: events fire based on DOM interactions which is fragile, and instrumentation is harder to version-control than application-layer code. Server-side events sent directly from the application to Snowplow's collector are more reliable and easier to test and audit. The data layer audit will clarify whether GTM configuration is a contributing factor to current data quality issues.
 
 ---
 
-## 4. Ingestion Path - Two Options
+## 4. Ingestion Path
 
-Vincent's suggestion of forwarding events from Snowplow directly to Mixpanel post-enrichment is architecturally valid and [supported natively by Mixpanel](https://docs.mixpanel.com/docs/tracking-methods/integrations/snowplow). But the right choice depends on timing.
+The Warehouse Connector in Mirror mode is the correct ingestion path for VP's architecture. It keeps BigQuery as the single source of truth and means any fix or modelling improvement made upstream propagates to Mixpanel automatically — including historically.
 
-### Option A - BigQuery → Warehouse Connector *(recommended now)*
+### Sync frequency
 
-Continue the current architecture. BigQuery is master. All enrichment, flattening, identity resolution and cleaning happens there. Mixpanel reads from BigQuery via Mirror. BigQuery also serves BI tools, data science and any future analytics consumers.
+Mirror mode supports **hourly syncs** and can also be **triggered via the Mixpanel API** for more frequent or event-driven updates. This significantly reduces the latency between live product behaviour and Mixpanel, and means the warehouse-first approach is suitable for VP's product analytics needs without any additional pipeline complexity.
 
-**Pros:**
-- No new pipeline work required
-- Mirror handles retroactive fixes automatically
-- BigQuery remains the audit trail and compliance record
-- A single change propagates to all consumers
-- Simplest to govern - one data model to maintain
+```
+# Trigger a sync on demand via the API
+POST https://eu.mixpanel.com/api/v2/warehouse-data/sync/{sync_id}/trigger
+```
 
-**Cons:**
-- Daily sync - Mixpanel is ~24h behind live behaviour
-- Not suitable for real-time alerting use cases
-
----
-
-### Option B - Snowplow → Mixpanel HTTP forwarding *(consider post-audit)*
-
-Configure Snowplow to forward enriched events directly to Mixpanel's ingestion API in near real-time, bypassing the daily sync cycle entirely.
-
-**Pros:**
-- Real-time dashboards and alerting
-- Removes daily sync latency
-
-**Cons:**
-- Requires Snowplow pipeline configuration change
-- Messy data upstream = messy data in Mixpanel, but faster
-- Creates two consumers of Snowplow output to maintain
-- Historical backfill still requires BigQuery anyway
-
-> **The decision rule:** Option A is correct today. Option B becomes worth evaluating once the data layer audit is complete and the BigQuery view is producing reliable output. Running Option B on top of unaudited data just delivers bad data faster.
-
-### A note on Google Tag Manager
-
-GTM as a collection mechanism introduces a layer of indirection that is hard to audit and version-control. As VP grows its event taxonomy, migrating toward server-side tracking - sending events from the application layer directly to Snowplow's collector endpoint - would give more reliable, auditable instrumentation. The data layer audit should make clear whether this is needed, or whether GTM is working correctly and the gaps are purely downstream.
+For VP's use cases — funnel analysis, conversion tracking, session-level retention — hourly or API-triggered syncs provide more than sufficient data freshness. There is no need to introduce a parallel real-time ingestion path alongside the warehouse connector for these purposes.
 
 ---
 
 ## 5. Mobile Strategy
 
-No mobile app instrumentation today is a material blind spot. Three options in order of recommended priority:
+The native mobile app has no event tracking today. The correct approach for VP's architecture — and the only one that preserves the single source of truth goal — is the **Snowplow mobile SDK** (iOS and Android).
 
-### Option 1 - Snowplow Mobile SDK *(recommended)*
-Add Snowplow's native iOS/Android tracker to the app. Events enrich and land in the same BigQuery table, then flow to Mixpanel via the existing Warehouse Connector. Keeps BigQuery as the single source of truth and maintains the architecture cleanly. Most implementation effort, but the correct long-term answer.
+Adding the Snowplow mobile SDK to the native app means mobile events enrich through the same pipeline and land in the same BigQuery table as web events, then flow to Mixpanel via the existing Warehouse Connector with no additional configuration. No parallel ingestion paths, no identity reconciliation challenges, no architectural compromise.
 
-### Option 2 - Mixpanel iOS/Android SDK *(fast start)*
-Instrument the native app directly and send events to Mixpanel in parallel with web. Fast to deploy, but creates a second ingestion path that diverges from BigQuery. Useful to get mobile data quickly while the Snowplow mobile implementation is being planned.
-
-### Option 3 - Mixpanel Autocapture on mobile web *(interim only)*
-Add Mixpanel's JS SDK with autocapture to the mobile web experience. No native app changes needed. Very limited in scope - cannot capture in-app interactions - but captures mobile web sessions quickly at near-zero instrumentation cost.
-
-> **Pragmatic path:** Deploy Option 3 now to capture mobile web sessions immediately. Run Option 1 (Snowplow mobile SDK) as a planned project alongside the data layer audit. This gives VP mobile insight within days while native instrumentation is properly scoped.
+This is a Phase 2 workstream, to be scoped and delivered once the data layer audit (Phase 1) is complete and the BigQuery modelling view is stable.
 
 ---
 
 ## 6. Data Layer Audit
 
-The following issues were identified during the POC by analysing Voyage Privé's live Mixpanel project. All fixes are upstream - changes to the BigQuery SQL view that feeds the Warehouse Connector. Because Mirror mode is active, each fix propagates automatically once applied in BigQuery.
+The following issues were identified during the POC by analysing VP's live Mixpanel project. All fixes belong in the BigQuery SQL modelling view that feeds the Warehouse Connector. Because Mirror mode is active, each fix propagates automatically once applied in BigQuery.
 
 | Issue | Fix location | Impact | Priority |
 |-------|-------------|--------|----------|
-| UTM medium undefined or polluted (88% of events) | BigQuery view + Snowplow enrichment | All traffic source analysis blocked | 🔴 Critical |
-| Raw Snowplow ARRAY context columns not flattened | BigQuery view - `SAFE_OFFSET(0)` extraction | `sale_id`, `booking_price`, `payment_method`, `session_index` inaccessible | 🔴 Critical |
+| UTM medium undefined or polluted (88% of events) | BigQuery view + confirm Snowplow UTM enrichment is firing | All traffic source analysis blocked | 🔴 Critical |
+| Raw Snowplow ARRAY context columns not flattened | BigQuery view — `SAFE_OFFSET(0)` extraction per field | `sale_id`, `booking_price`, `payment_method`, `session_index` inaccessible | 🔴 Critical |
 | `select_booking_option` event has zero data | Snowplow tracking or BigQuery `WHERE` clause | Checkout step 1→2 journey invisible | 🔴 Critical |
-| `session_index` contains non-numeric values | BigQuery view - `SAFE_CAST AS INT64` | New vs returning user segmentation unreliable | 🟠 High |
-| Device type fragmented + bot traffic included | BigQuery view - `CASE` normalisation + `is_bot` filter | Device breakdowns inflated and inconsistent | 🟠 High |
-| `sale_name`, `booking_price`, `payment_method` null | BigQuery view + confirm connector sync | Revenue and deal category analysis blocked | 🟠 High |
-| Multi-market URL paths not normalised (DE/AT/BE) | BigQuery view OR Mixpanel Custom Events | German and Dutch markets appear near-zero in funnels | 🟡 Medium |
+| `session_index` contains non-numeric values | BigQuery view — `SAFE_CAST AS INT64` | New vs returning user segmentation unreliable | 🟠 High |
+| Device type fragmented + bot traffic included | BigQuery view — `CASE` normalisation + `is_bot` flag | Device breakdowns inflated and inconsistent | 🟠 High |
+| `sale_name`, `booking_price`, `payment_method` null | BigQuery view — confirm ARRAY extraction is complete | Revenue and deal category analysis blocked | 🟠 High |
+| Multi-market URL paths not normalised (DE/AT/BE) | BigQuery view `page_category` column OR Mixpanel Custom Events | German and Dutch markets appear near-zero in funnels | 🟡 Medium |
 
-### Identity fix
-
-The most important fix - and the one that unlocks the three POC use cases - is the identity mapping. The events connector currently has only `user_id` mapped. `device_id` (`domain_userid`) is missing. Without both:
-
-```sql
--- Required in the BigQuery view
-user_id        -- authenticated identifier (null for anonymous / no cookie consent)
-domain_userid AS device_id  -- Snowplow cookie ID (present for all users)
-```
-
-When Mixpanel receives both on the same event, it automatically merges the anonymous and authenticated identities, connecting pre-login browsing to post-login purchase. The connector needs to be deleted and recreated with both columns mapped.
+A companion document with exact SQL examples for each fix, referencing VP's actual Snowplow column names and context schemas, is available separately.
 
 ---
 
 ## 7. Governance Model
 
-The architecture makes BigQuery the source of truth technically. Governance makes it the source of truth organisationally. Without it, different teams build different definitions of the same metric, trust in the data erodes, and PMs revert to asking the data team for SQL - the exact outcome VP is trying to avoid.
+The architecture makes BigQuery the source of truth technically. Governance makes it the source of truth organisationally. Without it, different teams build different definitions of the same metric, trust erodes, and PMs revert to asking the data team for SQL — the exact outcome VP is trying to avoid.
 
 ### BigQuery layer *(data team owns)*
-- Canonical SQL view - reviewed and version-controlled
-- Approved column list - no unmapped arrays or raw Snowplow fields
-- Change process - any schema change reviewed before sync
-- Identity model - `user_id` + `device_id` mapping documented and owned
-- Bot filtering - `is_bot` column maintained and applied
+- Canonical SQL modelling view — reviewed and version-controlled
+- Approved column list — no unmapped arrays or raw Snowplow field names exposed
+- Change process — any schema change reviewed before connector sync runs
+- Bot filtering — `is_bot` column maintained and applied consistently
 
 ### Mixpanel Lexicon layer *(data owner + PMs)*
 - All core events verified and named in plain language
-- Properties described - no raw Snowplow names visible to PMs
+- Properties described — no raw Snowplow names visible to PMs
 - Tags applied by domain: Booking, Search, Marketing, Identity
-- Raw / technical properties hidden from the default property picker
+- Raw and technical properties hidden from the default property picker
 - New events go through Event Approval before appearing in reports
 
-> Mixpanel's hub-and-spoke governance model fits VP's structure: a central data owner (Mathieu / Ahmed's team) owns the BigQuery view and Lexicon standards. Product team leads (Vincent's team) own their domain's events and dashboards. PMs are spoke consumers - they explore and build within governed, verified data, without needing SQL.
+> Mixpanel's hub-and-spoke governance model fits VP's structure well. A central data owner (Mathieu and Ahmed's team) owns the BigQuery modelling view and Lexicon standards. Product team leads (Vincent's team) own their domain events and dashboards. PMs are spoke consumers — they explore and build within governed, verified data, without needing SQL or data team involvement for every question.
 
 ---
 
@@ -203,41 +172,43 @@ The architecture makes BigQuery the source of truth technically. Governance make
 
 Sequenced to fix the foundation before adding capability. Each phase unlocks the next.
 
-### Phase 1 - Foundation: Data Audit *(now → 4–6 weeks)*
-- [ ] Fix BigQuery view - flatten all ARRAY contexts with `SAFE_OFFSET(0)`
-- [ ] Resolve identity mapping - add `device_id` to connector, re-import events table
+> **Note on timescales:** The durations below are indicative and subject to further scoping. Actual timelines will vary depending on the complexity of the data layer audit findings, team availability, existing data engineering capacity, and the scope of any Snowplow pipeline changes required. Phases may run in parallel where dependencies allow, or extend where audit findings reveal additional work.
+
+### Phase 1 — Foundation: Data Audit *(indicative: 4–6 weeks)*
+- [ ] Audit and fix BigQuery modelling view — flatten all ARRAY contexts with `SAFE_OFFSET(0)`
 - [ ] Normalise `utm_medium` and `utm_source` columns
 - [ ] Fix `session_index` type (`SAFE_CAST AS INT64`) and consolidate `device_type`
-- [ ] Investigate `select_booking_option` zero-data gap
-- [ ] Validate data in Mixpanel post re-import
+- [ ] Investigate `select_booking_option` zero-data gap in Snowplow tracking
+- [ ] Configure Mirror sync frequency — hourly or API-triggered
+- [ ] Validate full data quality in Mixpanel post-fix
+- [ ] Build Lexicon — verify core events, add descriptions and domain tags
 
-### Phase 2 - Expand: Mobile + Governance *(6–12 weeks)*
-- [ ] Deploy Mixpanel autocapture on mobile web (interim)
-- [ ] Scope and build Snowplow mobile SDK (iOS + Android)
-- [ ] Build Lexicon - verify core events, add descriptions and domain tags
-- [ ] Establish change management process for BigQuery view
+### Phase 2 — Expand: Mobile + Governance *(indicative: 6–12 weeks)*
+- [ ] Scope and instrument Snowplow mobile SDK (iOS + Android)
+- [ ] Validate mobile events flowing through BigQuery to Mixpanel
+- [ ] Establish formal change management process for the BigQuery modelling view
 - [ ] Build canonical PM dashboards by team and market
 - [ ] Enable Session Replay on the booking flow
+- [ ] Evaluate direct Snowplow SDK tracking to replace GTM client-side instrumentation
 
-### Phase 3 - Optimise: Real-time + Experimentation *(3–6 months)*
-- [ ] Evaluate Snowplow → Mixpanel real-time HTTP forwarding (Option B)
+### Phase 3 — Optimise: Experimentation + Expansion *(indicative: 3–6 months)*
 - [ ] Connect Mixpanel Experiments to A/B test measurement layer
-- [ ] Revenue Analytics - map `payment_amount` to Mixpanel revenue tracking
+- [ ] Revenue Analytics — map `payment_amount` to Mixpanel revenue tracking
 - [ ] MCP-enabled programmatic analysis for the data team
-- [ ] Feature Flags integration for experiment rollout
-- [ ] Expand to additional business units
+- [ ] Feature Flags integration for experiment rollout and measurement
+- [ ] Expand analytics coverage to additional business units
 
-> **Phase 1 delivers the majority of the POC use cases.** The three use cases submitted by VP - login to sales listing conversion, search bar impact, full funnel analysis - are all achievable once the data audit is complete. Phases 2 and 3 add mobile coverage, real-time capability and experimentation measurement on top of a solid foundation.
+> **Phase 1 delivers the majority of the POC use cases.** The three use cases submitted — login to sales listing conversion, search bar impact, full funnel analysis — are fully achievable once the data audit is complete. Phases 2 and 3 add mobile coverage, experimentation measurement and broader organisational rollout on top of a solid, audited foundation.
 
 ---
 
 ## References
 
 - [Mixpanel Warehouse Connector docs](https://docs.mixpanel.com/docs/tracking-methods/warehouse-connectors)
-- [Snowplow → Mixpanel integration](https://docs.mixpanel.com/docs/tracking-methods/integrations/snowplow)
+- [Snowplow integration](https://docs.mixpanel.com/docs/tracking-methods/integrations/snowplow)
 - [Warehouse best practices](https://docs.mixpanel.com/docs/tracking-best-practices/warehouse-best-practices)
-- [ID management - warehouse perspective](https://docs.mixpanel.com/docs/tracking-methods/id-management/identifying-users-simplified)
 - [Mixpanel Lexicon governance](https://docs.mixpanel.com/docs/data-governance/lexicon)
+- [Mirror mode sync documentation](https://docs.mixpanel.com/docs/tracking-methods/warehouse-connectors#mirror)
 
 ---
 
