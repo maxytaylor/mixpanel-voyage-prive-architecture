@@ -19,9 +19,9 @@
 
 ## 1. Background
 
-The POC has demonstrated that Mixpanel can power the product analytics use cases Voyage Privé needs — funnel analysis, segmentation, PM self-serve insight, retention. The data is there. The question being raised now is the right one: **what does a production-ready architecture look like, and where does Mixpanel sit within it?**
+The POC has demonstrated that Mixpanel can power the product analytics use cases Voyage Privé needs - funnel analysis, segmentation, PM self-serve insight, retention. The data is there. The question being raised now is the right one: **what does a production-ready architecture look like, and where does Mixpanel sit within it?**
 
-Vincent's instinct — that Snowplow and BigQuery should remain the source of truth, with Mixpanel as the analysis layer reading from them — is the correct framing. This document proposes how to get there, and in what order.
+Vincent's instinct, that Snowplow and BigQuery should remain the source of truth, with Mixpanel as the analysis layer reading from them — is the correct framing. This document proposes how to get there, and in what order.
 
 > **Core principle:** BigQuery is the source of truth. Mixpanel is the lens. Any fix, enrichment or new property is made once in BigQuery, and Mirror mode propagates it automatically — no re-instrumentation, no dual maintenance.
 
